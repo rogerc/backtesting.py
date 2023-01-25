@@ -638,19 +638,48 @@ class Trade:
     def pl(self):
         """Trade profit (positive) or loss (negative) in cash units."""
         price = self.__exit_price or self.__broker.last_price
-        return self.__size * (price - self.__entry_price)
+
+        if self.__broker._contract_multiplier > 0:
+            # print(
+            #     self.__size * (price - self.__entry_price) * self.__broker._contract_multiplier,
+            #     "size", self.__size, "exit", price , "entry", self.__entry_price, "diff", (price - self.__entry_price), "multiplier", self.__broker._contract_multiplier
+            # )
+            return self.__size * (price - self.__entry_price) * self.__broker._contract_multiplier - self.__broker._contract_commission * self.__size * 2
+        else:
+            return self.__size * (price - self.__entry_price)
+
+    @property
+    def commission(self):
+        price = self.__exit_price or self.__broker.last_price
+
+        if self.__broker._contract_multiplier > 0:
+            # print(
+            #     self.__size * (price - self.__entry_price) * self.__broker._contract_multiplier,
+            #     "size", self.__size, "exit", price , "entry", self.__entry_price, "diff", (price - self.__entry_price), "multiplier", self.__broker._contract_multiplier
+            # )
+            return self.__broker._contract_commission * self.__size * 2
+        else:
+            return self.__size * self.commission * (price + self.__entry_price)
 
     @property
     def pl_pct(self):
         """Trade profit (positive) or loss (negative) in percent."""
         price = self.__exit_price or self.__broker.last_price
+
+        if self.__broker._contract_multiplier > 0:
+            return (price - self.__entry_price)
+            # return (self.pl+ self.commission)/self.__broker._contract_multiplier
+        
         return copysign(1, self.__size) * (price / self.__entry_price - 1)
 
     @property
     def value(self):
-        """Trade total value in cash (volume × price)."""
-        price = self.__exit_price or self.__broker.last_price
-        return abs(self.__size) * price
+        """Trade total value in cash (volume × price) or margin allocated per contract."""
+        if self.__broker._contract_multiplier > 0:
+            return abs(self.__size) * self.__broker._contract_margin
+        else:
+            price = self.__exit_price or self.__broker.last_price
+            return abs(self.__size) * price
 
     # SL/TP management API
 
@@ -699,7 +728,8 @@ class Trade:
 
 class _Broker:
     def __init__(self, *, data, cash, commission, margin,
-                 trade_on_close, hedging, exclusive_orders, index):
+                 trade_on_close, hedging, exclusive_orders, index, 
+                 contract_multiplier = 0, contract_commission = 0, contract_margin = 0):
         assert 0 < cash, f"cash should be >0, is {cash}"
         assert -.1 <= commission < .1, \
             ("commission should be between -10% "
@@ -718,6 +748,10 @@ class _Broker:
         self.trades: List[Trade] = []
         self.position = Position(self)
         self.closed_trades: List[Trade] = []
+
+        self._contract_multiplier = contract_multiplier
+        self._contract_commission = contract_commission
+        self._contract_margin = contract_margin
 
     def __repr__(self):
         return f'<Broker: {self._cash:.0f}{self.position.pl:+.1f} ({len(self.trades)} trades)>'
@@ -792,7 +826,11 @@ class _Broker:
     @property
     def margin_available(self) -> float:
         # From https://github.com/QuantConnect/Lean/pull/3768
+
         margin_used = sum(trade.value / self._leverage for trade in self.trades)
+        # for trade in self.trades:
+        #     print(margin_used, trade.entry_bar, trade.entry_price, trade.size, trade.value)
+
         return max(0, self.equity - margin_used)
 
     def next(self):
@@ -928,7 +966,13 @@ class _Broker:
                         break
 
             # If we don't have enough liquidity to cover for the order, cancel it
-            if abs(need_size) * adjusted_price > self.margin_available * self._leverage:
+            if (self._contract_multiplier > 0):
+                if (abs(need_size) * self._contract_margin > self.margin_available * self._leverage):
+                    print("removing order... not enough liquidity", abs(need_size) , self._contract_margin , self.margin_available , self._leverage)
+                    self.orders.remove(order)
+                    continue
+                # print("margin available checked", abs(need_size) * self._contract_margin, self.margin_available * self._leverage, abs(need_size) , self._contract_margin , self.margin_available , self._leverage)
+            elif abs(need_size) * adjusted_price > self.margin_available * self._leverage:
                 self.orders.remove(order)
                 continue
 
@@ -997,6 +1041,15 @@ class _Broker:
         self.closed_trades.append(trade._replace(exit_price=price, exit_bar=time_index))
         self._cash += trade.pl
 
+        # print(
+        #     trade.entry_bar,
+        #     trade.entry_price,
+        #     trade.exit_bar,
+        #     trade.exit_price,
+        #     trade.pl
+        # )
+
+
     def _open_trade(self, price: float, size: int,
                     sl: Optional[float], tp: Optional[float], time_index: int, tag):
         trade = Trade(self, size, price, time_index, tag)
@@ -1030,8 +1083,11 @@ class Backtest:
                  margin: float = 1.,
                  trade_on_close=False,
                  hedging=False,
-                 exclusive_orders=False
-                 ):
+                 exclusive_orders=False,
+                 contract_multiplier: int = 0,
+                 contract_commission: float = 0,
+                 contract_margin: int = 0
+                ):
         """
         Initialize a backtest. Requires data and a strategy to test.
 
@@ -1077,6 +1133,7 @@ class Backtest:
 
         [FIFO]: https://www.investopedia.com/terms/n/nfa-compliance-rule-2-43b.asp
         """
+        self.is_futures: bool = contract_multiplier > 0
 
         if not (isinstance(strategy, type) and issubclass(strategy, Strategy)):
             raise TypeError('`strategy` must be a Strategy sub-type')
@@ -1085,7 +1142,14 @@ class Backtest:
         if not isinstance(commission, Number):
             raise TypeError('`commission` must be a float value, percent of '
                             'entry order price')
-
+        if not isinstance(contract_commission, Number):
+            raise TypeError('`contract commission` must be a float value, percent of '
+                            'entry order price')
+        if not isinstance(contract_margin, int):
+            raise TypeError('`contract margin` must be a int value')
+        if not isinstance(contract_multiplier, int):
+            raise TypeError('`contract multiplier` must be a int value')
+        
         data = data.copy(deep=False)
 
         # Convert index to datetime index
@@ -1111,7 +1175,7 @@ class Backtest:
             raise ValueError('Some OHLC values are missing (NaN). '
                              'Please strip those lines with `df.dropna()` or '
                              'fill them in with `df.interpolate()` or whatever.')
-        if np.any(data['Close'] > cash):
+        if np.any(data['Close'] > cash) and not self.is_futures:
             warnings.warn('Some prices are larger than initial cash value. Note that fractional '
                           'trading is not supported. If you want to trade Bitcoin, '
                           'increase initial cash, or trade μBTC or satoshis instead (GH-134).',
@@ -1130,9 +1194,11 @@ class Backtest:
             _Broker, cash=cash, commission=commission, margin=margin,
             trade_on_close=trade_on_close, hedging=hedging,
             exclusive_orders=exclusive_orders, index=data.index,
+            contract_multiplier=contract_multiplier, contract_commission=contract_commission, contract_margin=contract_margin
         )
         self._strategy = strategy
         self._results: Optional[pd.Series] = None
+        
 
     def run(self, **kwargs) -> pd.Series:
         """
@@ -1238,6 +1304,7 @@ class Backtest:
                 ohlc_data=self._data,
                 risk_free_rate=0.0,
                 strategy_instance=strategy,
+                is_futures=self.is_futures
             )
 
         return self._results

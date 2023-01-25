@@ -1,6 +1,10 @@
 """
 
+local copu
+
 ![xkcd.com/1570](https://imgs.xkcd.com/comics/engineer_syllogism.png)
+
+fasdfasdf
 
 ## Manuals
 

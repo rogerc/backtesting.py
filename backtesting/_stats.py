@@ -38,6 +38,7 @@ def compute_stats(
         ohlc_data: pd.DataFrame,
         strategy_instance: 'Strategy',
         risk_free_rate: float = 0,
+        is_futures: bool = False
 ) -> pd.Series:
     assert -1 < risk_free_rate < 1
 
@@ -130,10 +131,34 @@ def compute_stats(
     s.loc['# Trades'] = n_trades = len(trades_df)
     win_rate = np.nan if not n_trades else (pl > 0).mean()
     s.loc['Win Rate [%]'] = win_rate * 100
-    s.loc['Best Trade [%]'] = returns.max() * 100
-    s.loc['Worst Trade [%]'] = returns.min() * 100
-    mean_return = geometric_mean(returns)
-    s.loc['Avg. Trade [%]'] = mean_return * 100
+    if is_futures:
+        s.loc['Best Trade'] = returns.max()
+        s.loc['Worst Trade'] = returns.min()
+        s.loc['Avg. Trade [+]'] = returns.loc[lambda x : x >= 0].mean()
+        s.loc['Avg. Trade [-]'] = returns.loc[lambda x : x < 0].mean()
+        # print(trades_df.head())
+        # print(trades_df["EntryTime"].head())
+        # print(trades_df["EntryTime"].between_time(start_time="09:30:00", end_time="16:00:00", axis="EntryTime"))
+        total_trades = len(trades_df)
+        index_start = pd.DatetimeIndex(trades_df["EntryTime"])        
+        start_df = trades_df.iloc[index_start.indexer_between_time('9:30','16:00')]
+        index_exit = pd.DatetimeIndex(start_df["ExitTime"])
+        end_df = start_df.iloc[index_exit.indexer_between_time('9:30','16:00')]
+        print(end_df.head())
+        s.loc['Trades (9:30-16:00) Total'] = len(end_df)
+        s.loc['Trades (9:30-16:00) P&L'] = end_df["PnL"].sum()
+        s.loc['Trades (9:30-16:00) [ + ]'] = end_df["PnL"].loc[lambda x : x >= 0].sum()
+        s.loc['Trades (9:30-16:00) [ - ]'] = end_df["PnL"].loc[lambda x : x < 0].sum()
+        s.loc['Trades (Out-of-hours) Total'] = total_trades - len(end_df)
+        s.loc['Trades (Out-of-hours) P&L'] = trades_df["PnL"].sum() - end_df["PnL"].sum()
+        s.loc['Trades (Out-of-hours) [ + ]'] = trades_df["PnL"].loc[lambda x : x >= 0].sum() - end_df["PnL"].loc[lambda x : x >= 0].sum()
+        s.loc['Trades (Out-of-hours) [ - ]'] = trades_df["PnL"].loc[lambda x : x < 0].sum() - end_df["PnL"].loc[lambda x : x < 0].sum()
+    else:
+        s.loc['Best Trade [%]'] = returns.max() * 100
+        s.loc['Worst Trade [%]'] = returns.min() * 100
+        mean_return = geometric_mean(returns)
+        s.loc['Avg. Trade [%]'] = mean_return * 100
+
     s.loc['Max. Trade Duration'] = _round_timedelta(durations.max())
     s.loc['Avg. Trade Duration'] = _round_timedelta(durations.mean())
     s.loc['Profit Factor'] = returns[returns > 0].sum() / (abs(returns[returns < 0].sum()) or np.nan)  # noqa: E501
@@ -143,8 +168,7 @@ def compute_stats(
 
     s.loc['_strategy'] = strategy_instance
     s.loc['_equity_curve'] = equity_df
-    s.loc['_trades'] = trades_df
-
+    s.loc['_trades'] = trades_df    
     s = _Stats(s)
     return s
 
