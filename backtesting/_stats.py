@@ -32,6 +32,26 @@ def geometric_mean(returns: pd.Series) -> float:
     return np.exp(np.log(returns).sum() / (len(returns) or np.nan)) - 1
 
 
+def compute_trade_max_min(trades: pd.DataFrame):
+    trades = trades.copy()
+    m = trades["PnL"].gt(0).map({True: 'positive', False: 'negative'})
+    df2 = trades.groupby([m, m.ne(m.shift()).cumsum()])['PnL'].agg(['count', 'sum'])
+    minMaxRuns = df2.loc[df2.groupby(level=0)['count'].idxmax()].droplevel(1)
+    return minMaxRuns
+
+def compute_trade_by_weekday(trades: pd.DataFrame) -> pd.DataFrame:
+    if len(trades) == 0:
+        return []
+    weekdaydf = trades.copy()
+    weekdaydf["weekday"] = weekdaydf['EntryTime'].dt.weekday
+    weekdaydf["weekday_name"] = weekdaydf['EntryTime'].dt.strftime('%A')
+    weekdaydf = weekdaydf[["weekday", "weekday_name", "PnL"]]    
+    grouped = weekdaydf.groupby(by=["weekday","weekday_name"], sort=True).sum(numeric_only=True).reset_index()
+    grouped = grouped[["weekday_name","PnL"]].round(2)
+    grouped.set_index("weekday_name", inplace= True)
+    values = pd.concat([grouped["PnL"][grouped.idxmin()], grouped["PnL"][grouped.idxmax()]]).reset_index()
+    return values
+
 def compute_stats(
         trades: Union[List['Trade'], pd.DataFrame],
         equity: np.ndarray,
@@ -67,6 +87,7 @@ def compute_stats(
             'EntryTime': [t.entry_time for t in trades],
             'ExitTime': [t.exit_time for t in trades],
             'Tag': [t.tag for t in trades],
+            'Commission': [t.commission for t in trades]
         })
         trades_df['Duration'] = trades_df['ExitTime'] - trades_df['EntryTime']
     del trades
@@ -74,6 +95,9 @@ def compute_stats(
     pl = trades_df['PnL']
     returns = trades_df['ReturnPct']
     durations = trades_df['Duration']
+
+    minMaxRuns = compute_trade_max_min(trades_df)
+    bestWorstWeekday = compute_trade_by_weekday(trades_df)
 
     def _round_timedelta(value, _period=_data_period(index)):
         if not isinstance(value, pd.Timedelta):
@@ -136,15 +160,18 @@ def compute_stats(
         s.loc['Worst Trade'] = returns.min()
         s.loc['Avg. Trade [+]'] = returns.loc[lambda x : x >= 0].mean()
         s.loc['Avg. Trade [-]'] = returns.loc[lambda x : x < 0].mean()
-        # print(trades_df.head())
-        # print(trades_df["EntryTime"].head())
-        # print(trades_df["EntryTime"].between_time(start_time="09:30:00", end_time="16:00:00", axis="EntryTime"))
         total_trades = len(trades_df)
         index_start = pd.DatetimeIndex(trades_df["EntryTime"])        
         start_df = trades_df.iloc[index_start.indexer_between_time('9:30','16:00')]
         index_exit = pd.DatetimeIndex(start_df["ExitTime"])
         end_df = start_df.iloc[index_exit.indexer_between_time('9:30','16:00')]
-        print(end_df.head())
+
+        s.loc["Best Weekday: [ + ]"] = "-" if len(bestWorstWeekday) == 0 else f'{bestWorstWeekday["weekday_name"][1]}  {bestWorstWeekday["PnL"][1]}'
+        s.loc["Worst Weekday: [ - ]"] = "-" if len(bestWorstWeekday) == 0 else f'{bestWorstWeekday["weekday_name"][0]}  {bestWorstWeekday["PnL"][0]}'        
+        s.loc["Trades max run: [ + ]"] =  minMaxRuns["count"].loc["positive"] if "positive" in minMaxRuns.index else 0
+        s.loc["Trades max run: [ - ]"] =  minMaxRuns["count"].loc["negative"] if "negative" in minMaxRuns.index else 0
+        s.loc["Equity max run: [ + ]"] =  minMaxRuns["sum"].loc["positive"] if "positive" in minMaxRuns.index else 0
+        s.loc["Equity max run: [ - ]"] =  minMaxRuns["sum"].loc["negative"] if "negative" in minMaxRuns.index else 0
         s.loc['Trades (9:30-16:00) Total'] = len(end_df)
         s.loc['Trades (9:30-16:00) P&L'] = end_df["PnL"].sum()
         s.loc['Trades (9:30-16:00) [ + ]'] = end_df["PnL"].loc[lambda x : x >= 0].sum()
@@ -153,6 +180,7 @@ def compute_stats(
         s.loc['Trades (Out-of-hours) P&L'] = trades_df["PnL"].sum() - end_df["PnL"].sum()
         s.loc['Trades (Out-of-hours) [ + ]'] = trades_df["PnL"].loc[lambda x : x >= 0].sum() - end_df["PnL"].loc[lambda x : x >= 0].sum()
         s.loc['Trades (Out-of-hours) [ - ]'] = trades_df["PnL"].loc[lambda x : x < 0].sum() - end_df["PnL"].loc[lambda x : x < 0].sum()
+        s.loc["Total Commission"] = trades_df["Commission"].sum()
     else:
         s.loc['Best Trade [%]'] = returns.max() * 100
         s.loc['Worst Trade [%]'] = returns.min() * 100
@@ -168,7 +196,7 @@ def compute_stats(
 
     s.loc['_strategy'] = strategy_instance
     s.loc['_equity_curve'] = equity_df
-    s.loc['_trades'] = trades_df    
+    s.loc['_trades'] = trades_df
     s = _Stats(s)
     return s
 
