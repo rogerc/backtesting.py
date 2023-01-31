@@ -90,7 +90,7 @@ def cross(series1: Sequence, series2: Sequence) -> bool:
     return crossover(series1, series2) or crossover(series2, series1)
 
 
-def crossover(series1: Sequence, series2: Sequence) -> bool:
+def crossover(series1: Sequence, series2: Sequence, distance: int = -1) -> bool:
     """
     Return `True` if `series1` just crossed over (above)
     `series2`.
@@ -107,7 +107,7 @@ def crossover(series1: Sequence, series2: Sequence) -> bool:
         (series2, series2) if isinstance(series2, Number) else
         series2)
     try:
-        return series1[-2] < series2[-2] and series1[-1] > series2[-1]
+        return series1[distance-1] < series2[distance-1] and series1[distance] > series2[distance]
     except IndexError:
         return False
 
