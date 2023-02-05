@@ -193,6 +193,7 @@ def compute_stats(
     s.loc['Expectancy [%]'] = returns.mean() * 100
     s.loc['SQN'] = np.sqrt(n_trades) * pl.mean() / (pl.std() or np.nan)
     s.loc['Kelly Criterion'] = win_rate - (1 - win_rate) / (pl[pl > 0].mean() / -pl[pl < 0].mean())
+    s.loc['Equity Min [$]'] = equity.min()
 
     s.loc['_strategy'] = strategy_instance
     s.loc['_equity_curve'] = equity_df
